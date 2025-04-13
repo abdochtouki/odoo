@@ -54,9 +54,9 @@ jobs:
     - name: Load Docker image
       run: docker load -i odoo-image.tar
   
-    - name: Run tests with detailed debugging
+    - name: Run complete test with debugging
       run: |
-        # Start PostgreSQL with health check
+        # 1. Start PostgreSQL with proper initialization
         docker run -d --name test-postgres \
           -e POSTGRES_USER=odoo \
           -e POSTGRES_PASSWORD=odoo \
@@ -67,11 +67,16 @@ jobs:
           --health-retries=10 \
           postgres:13
   
-        # Verify PostgreSQL is healthy
-        docker inspect --format "{{json .State.Health.Status }}" test-postgres | grep -q '"healthy"'
+        # Wait for PostgreSQL to be fully ready
+        echo "Waiting for PostgreSQL to initialize..."
+        docker inspect --format "{{json .State.Health.Status }}" test-postgres | grep -q '"healthy"' || {
+          echo "PostgreSQL failed to start"
+          docker logs test-postgres
+          exit 1
+        }
         echo "PostgreSQL is ready"
   
-        # Start Odoo with logs visible
+        # 2. Start Odoo with debug mode
         docker run -d --name odoo-test \
           --link test-postgres:db \
           -p 8069:8069 \
@@ -79,37 +84,61 @@ jobs:
           -e USER=odoo \
           -e PASSWORD=odoo \
           -e ODOO_RC=/etc/odoo/odoo.conf \
+          -e ODOO_DEBUG=1 \
           ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
   
-        # Show Odoo logs in background
-        docker logs -f odoo-test &
-        LOG_PID=$!
-  
-        # Wait for Odoo to start with timeout
-        echo "Waiting for Odoo to start..."
-        for i in {1..30}; do
-          if curl -sSf http://localhost:8069/web/database/selector >/dev/null; then
-            echo "Odoo is ready!"
-            kill $LOG_PID
-            break
-          fi
-          echo "Attempt $i/30 - Odoo not ready yet..."
-          sleep 5
-          if [ $i -eq 30 ]; then
-            echo "Odoo failed to start within 150 seconds"
+        # 3. Monitor Odoo startup
+        echo "Monitoring Odoo startup..."
+        ATTEMPT=0
+        MAX_ATTEMPTS=30
+        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          ATTEMPT=$((ATTEMPT+1))
+          
+          # Check container status
+          CONTAINER_STATUS=$(docker inspect --format "{{.State.Status}}" odoo-test)
+          if [ "$CONTAINER_STATUS" != "running" ]; then
+            echo "Odoo container is not running (status: $CONTAINER_STATUS)"
             docker logs odoo-test
-            docker exec odoo-test ps aux
             exit 1
           fi
+          
+          # Check HTTP access
+          if curl -sSf http://localhost:8069/web/database/selector >/dev/null; then
+            echo "Odoo is ready after $((ATTEMPT*5)) seconds"
+            break
+          fi
+          
+          # Final attempt failure
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "Odoo failed to start within $((MAX_ATTEMPTS*5)) seconds"
+            echo "=== Odoo Container Logs ==="
+            docker logs odoo-test
+            echo "=== Running Processes ==="
+            docker exec odoo-test ps aux
+            echo "=== Network Connections ==="
+            docker exec odoo-test netstat -tuln
+            echo "=== Configuration Files ==="
+            docker exec odoo-test ls -la /etc/odoo/
+            docker exec odoo-test cat /etc/odoo/odoo.conf || true
+            exit 1
+          fi
+          
+          echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - Waiting 5 seconds..."
+          sleep 5
         done
   
-        # Verify Odoo is running properly
-        curl -v http://localhost:8069/web/database/selector || exit 1
+        # 4. Verify full functionality
+        echo "Running final verification..."
+        curl -v http://localhost:8069/web/database/selector || {
+          echo "Final verification failed"
+          docker logs odoo-test
+          exit 1
+        }
   
-        # Clean up
+        # 5. Clean up
         docker stop odoo-test test-postgres
         docker rm odoo-test test-postgres
-
+        echo "Test completed successfully"
   push:
     needs: [build, test]
     runs-on: ubuntu-latest
