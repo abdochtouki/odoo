@@ -44,44 +44,68 @@ jobs:
   test:
     needs: build
     runs-on: ubuntu-latest
-
+  
     steps:
     - name: Download Docker image
       uses: actions/download-artifact@v4
       with:
         name: odoo-docker-image
-
+  
     - name: Load Docker image
       run: docker load -i odoo-image.tar
-
-    - name: Run tests
+  
+    - name: Run tests with detailed debugging
       run: |
-        # Start a temporary PostgreSQL container for testing
+        # Start PostgreSQL with health check
         docker run -d --name test-postgres \
           -e POSTGRES_USER=odoo \
           -e POSTGRES_PASSWORD=odoo \
           -e POSTGRES_DB=postgres \
-          -p 5432:5432 \
+          --health-cmd="pg_isready -U odoo" \
+          --health-interval=5s \
+          --health-timeout=2s \
+          --health-retries=10 \
           postgres:13
-        
-        # Wait for PostgreSQL to be ready
-        sleep 10
-        
-        # Start Odoo with test configuration
+  
+        # Verify PostgreSQL is healthy
+        docker inspect --format "{{json .State.Health.Status }}" test-postgres | grep -q '"healthy"'
+        echo "PostgreSQL is ready"
+  
+        # Start Odoo with logs visible
         docker run -d --name odoo-test \
           --link test-postgres:db \
           -p 8069:8069 \
           -e HOST=db \
           -e USER=odoo \
           -e PASSWORD=odoo \
+          -e ODOO_RC=/etc/odoo/odoo.conf \
           ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
-        
-        # Wait for Odoo to start
-        sleep 30
-        
-        # Test if Odoo is running
-        curl --fail http://localhost:8069/web/database/selector || exit 1
-        
+  
+        # Show Odoo logs in background
+        docker logs -f odoo-test &
+        LOG_PID=$!
+  
+        # Wait for Odoo to start with timeout
+        echo "Waiting for Odoo to start..."
+        for i in {1..30}; do
+          if curl -sSf http://localhost:8069/web/database/selector >/dev/null; then
+            echo "Odoo is ready!"
+            kill $LOG_PID
+            break
+          fi
+          echo "Attempt $i/30 - Odoo not ready yet..."
+          sleep 5
+          if [ $i -eq 30 ]; then
+            echo "Odoo failed to start within 150 seconds"
+            docker logs odoo-test
+            docker exec odoo-test ps aux
+            exit 1
+          fi
+        done
+  
+        # Verify Odoo is running properly
+        curl -v http://localhost:8069/web/database/selector || exit 1
+  
         # Clean up
         docker stop odoo-test test-postgres
         docker rm odoo-test test-postgres
