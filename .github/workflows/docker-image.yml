@@ -34,6 +34,25 @@ jobs:
     - name: Generate image tag
       id: tag
       run: echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+  push:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ env.DOCKER_HUB_USERNAME }}
+        password: ${{ env.DOCKER_HUB_TOKEN }}
+
+    - name: Push Docker image
+      run: |
+        docker tag ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} ${{ env.DOCKER_IMAGE_NAME }}:latest
+        docker push ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
+        docker push ${{ env.DOCKER_IMAGE_NAME }}:latest
 
   test:
     needs: build
@@ -60,25 +79,6 @@ jobs:
         docker stop odoo-test
         docker rm odoo-test
 
-  push:
-    needs: [build, test]
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v2
-      with:
-        username: ${{ env.DOCKER_HUB_USERNAME }}
-        password: ${{ env.DOCKER_HUB_TOKEN }}
-
-    - name: Push Docker image
-      run: |
-        docker tag ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} ${{ env.DOCKER_IMAGE_NAME }}:latest
-        docker push ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
-        docker push ${{ env.DOCKER_IMAGE_NAME }}:latest
 
   deploy:
     needs: push
