@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 env:
-  DOCKER_IMAGE_NAME: your-dockerhub-username/odoo-app
+  DOCKER_IMAGE_NAME: abdochtouki/odoo-app
   DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
   DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
   AWS_EC2_HOST: ${{ secrets.AWS_EC2_HOST }}
@@ -94,7 +94,7 @@ jobs:
         ssh -o StrictHostKeyChecking=no ${{ env.AWS_EC2_USER }}@${{ env.AWS_EC2_HOST }} << 'EOF'
         # Pull the latest Docker image
         docker pull ${{ env.DOCKER_IMAGE_NAME }}:latest
-        
+        cd odoo-project
         # Stop and remove the old container if it exists
         docker stop odoo-app || true
         docker rm odoo-app || true
