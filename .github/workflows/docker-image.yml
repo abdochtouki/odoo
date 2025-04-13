@@ -3,8 +3,6 @@ name: Odoo CI/CD Pipeline
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
 
 env:
   DOCKER_IMAGE_NAME: abdochtouki/odoo-app
@@ -28,19 +26,78 @@ jobs:
       uses: docker/setup-buildx-action@v2
 
     - name: Build Docker image
-      id: build
       run: docker build -t ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} .
+
+    - name: Save Docker image
+      run: docker save ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} -o odoo-image.tar
+
+    - name: Upload Docker image
+      uses: actions/upload-artifact@v3
+      with:
+        name: odoo-docker-image
+        path: odoo-image.tar
 
     - name: Generate image tag
       id: tag
       run: echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download Docker image
+      uses: actions/download-artifact@v3
+      with:
+        name: odoo-docker-image
+
+    - name: Load Docker image
+      run: docker load -i odoo-image.tar
+
+    - name: Run tests
+      run: |
+        # Start a temporary PostgreSQL container for testing
+        docker run -d --name test-postgres \
+          -e POSTGRES_USER=odoo \
+          -e POSTGRES_PASSWORD=odoo \
+          -e POSTGRES_DB=postgres \
+          -p 5432:5432 \
+          postgres:13
+        
+        # Wait for PostgreSQL to be ready
+        sleep 10
+        
+        # Start Odoo with test configuration
+        docker run -d --name odoo-test \
+          --link test-postgres:db \
+          -p 8069:8069 \
+          -e HOST=db \
+          -e USER=odoo \
+          -e PASSWORD=odoo \
+          ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
+        
+        # Wait for Odoo to start
+        sleep 30
+        
+        # Test if Odoo is running
+        curl --fail http://localhost:8069/web/database/selector || exit 1
+        
+        # Clean up
+        docker stop odoo-test test-postgres
+        docker rm odoo-test test-postgres
+
   push:
     needs: [build, test]
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+    - name: Download Docker image
+      uses: actions/download-artifact@v3
+      with:
+        name: odoo-docker-image
+
+    - name: Load Docker image
+      run: docker load -i odoo-image.tar
 
     - name: Login to Docker Hub
       uses: docker/login-action@v2
@@ -53,32 +110,6 @@ jobs:
         docker tag ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} ${{ env.DOCKER_IMAGE_NAME }}:latest
         docker push ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
         docker push ${{ env.DOCKER_IMAGE_NAME }}:latest
-
-  test:
-    needs: build
-    runs-on: ubuntu-latest
-  
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-  
-    - name: Login to Docker Hub
-      uses: docker/login-action@v2
-      with:
-        username: ${{ env.DOCKER_HUB_USERNAME }}
-        password: ${{ env.DOCKER_HUB_TOKEN }}
-  
-    - name: Pull the built image
-      run: docker pull ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
-  
-    - name: Run tests
-      run: |
-        docker run -d --name odoo-test -p 8069:8069 ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
-        sleep 30 # Wait for Odoo to start
-        curl --fail http://localhost:8069 || exit 1
-        docker stop odoo-test
-        docker rm odoo-test
-
 
   deploy:
     needs: push
@@ -96,20 +127,25 @@ jobs:
         ssh -o StrictHostKeyChecking=no ${{ env.AWS_EC2_USER }}@${{ env.AWS_EC2_HOST }} << 'EOF'
         # Pull the latest Docker image
         docker pull ${{ env.DOCKER_IMAGE_NAME }}:latest
+        
         cd odoo-project
+        
         # Stop and remove the old container if it exists
         docker stop odoo-app || true
         docker rm odoo-app || true
         
-        # Run the new container
+        # Run the new container (with your actual production configuration)
         docker run -d \
           --name odoo-app \
           -p 8069:8069 \
           -p 8071:8071 \
           -p 8072:8072 \
+          --link postgres:db \
           -v odoo-data:/var/lib/odoo \
           -v odoo-extra-addons:/mnt/extra-addons \
-          --env-file /home/odoo/env.list \
+          -e HOST=db \
+          -e USER=odoo \
+          -e PASSWORD=odoo \
           ${{ env.DOCKER_IMAGE_NAME }}:latest
         
         # Clean up old images
