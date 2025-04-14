@@ -5,11 +5,15 @@ on:
     branches: [ main ]
 
 jobs:
-  build-and-deploy:
+  # ------------------------
+  # 1. Build & Push Docker Image (CI)
+  # ------------------------
+  build:
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v3
 
       - name: Set up Docker Buildx
@@ -21,7 +25,7 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and push Docker image
+      - name: Build and Push Docker Image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -29,12 +33,21 @@ jobs:
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/odoo:latest
 
-      - name: Prepare SSH key
+  # ------------------------
+  # 2. Deploy to EC2 (CD)
+  # ------------------------
+  deploy:
+    name: Deploy to AWS EC2
+    runs-on: ubuntu-latest
+    needs: build  # waits for 'build' job to complete successfully
+
+    steps:
+      - name: Prepare SSH Key
         run: |
           echo "${{ secrets.EC2_SSH_KEY }}" > private_key.pem
           chmod 600 private_key.pem
 
-      - name: Deploy to EC2 via SSH
+      - name: SSH into EC2 and Deploy
         run: |
           ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
             cd ~/odoo-docker
@@ -42,3 +55,6 @@ jobs:
             docker-compose down
             docker-compose up -d
           EOF
+
+      - name: Cleanup SSH Key
+        run: rm private_key.pem
