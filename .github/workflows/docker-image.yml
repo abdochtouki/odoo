@@ -4,211 +4,41 @@ on:
   push:
     branches: [ main ]
 
-env:
-  DOCKER_IMAGE_NAME: abdochtouki/odoo-app
-  DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
-  DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
-  AWS_EC2_HOST: ${{ secrets.AWS_EC2_HOST }}
-  AWS_EC2_USER: ${{ secrets.AWS_EC2_USER }}
-  AWS_EC2_SSH_KEY: ${{ secrets.AWS_EC2_SSH_KEY }}
-
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.tag.outputs.image_tag }}
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Build Docker image
-      run: docker build -t ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} .
-
-    - name: Save Docker image
-      run: docker save ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} -o odoo-image.tar
-
-    - name: Upload Docker image
-      uses: actions/upload-artifact@v4
-      with:
-        name: odoo-docker-image
-        path: odoo-image.tar
-
-    - name: Generate image tag
-      id: tag
-      run: echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
-
-  test:
-    needs: build
-    runs-on: ubuntu-latest
-  
-    steps:
-    - name: Setup Docker environment
-      run: |
-        # Create dedicated network and volume
-        docker network create odoo-test-net
-        docker volume create pgdata-volume
-        
-        # Set proper permissions on volume (critical fix)
-        docker run --rm -v pgdata-volume:/data busybox chown -R 999:999 /data
-  
-    - name: Download and load Docker image
-      uses: actions/download-artifact@v4
-      with:
-        name: odoo-docker-image
-      run: docker load -i odoo-image.tar
-  
-    - name: Start PostgreSQL with robust initialization
-      run: |
-        # Start PostgreSQL with explicit configuration
-        docker run -d --name test-postgres \
-          --network odoo-test-net \
-          -e POSTGRES_USER=odoo \
-          -e POSTGRES_PASSWORD=odoo \
-          -e POSTGRES_DB=postgres \
-          -e PGDATA=/var/lib/postgresql/data/pgdata \
-          -v pgdata-volume:/var/lib/postgresql/data \
-          -p 5432:5432 \
-          postgres:13 \
-          -c log_statement=all \
-          -c log_min_messages=DEBUG1
-  
-        # Wait for PostgreSQL with comprehensive checks
-        echo "Waiting for PostgreSQL initialization..."
-        for i in {1..30}; do
-          if docker logs test-postgres 2>&1 | grep -q "database system is ready to accept connections"; then
-            echo "PostgreSQL is ready!"
-            break
-          fi
-          if [ $i -eq 30 ]; then
-            echo "PostgreSQL failed to start within 150 seconds"
-            echo "=== PostgreSQL Logs ==="
-            docker logs test-postgres
-            echo "=== Data Directory Contents ==="
-            docker exec test-postgres ls -la /var/lib/postgresql/data
-            exit 1
-          fi
-          sleep 5
-        done
-  
-        # Verify PostgreSQL is fully operational
-        docker exec test-postgres psql -U odoo -d postgres -c "SELECT 1" || {
-          echo "PostgreSQL connection test failed"
-          docker logs test-postgres
-          exit 1
-        }
-  
-    - name: Test Odoo connection
-      run: |
-        # Start Odoo with PostgreSQL connection
-        docker run -d --name odoo-test \
-          --network odoo-test-net \
-          -p 8069:8069 \
-          -e HOST=test-postgres \
-          -e USER=odoo \
-          -e PASSWORD=odoo \
-          -e ODOO_RC=/etc/odoo/odoo.conf \
-          ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
-  
-        # Wait for Odoo with detailed debugging
-        echo "Waiting for Odoo to start..."
-        for i in {1..30}; do
-          if curl -sSf http://localhost:8069/web/database/selector >/dev/null; then
-            echo "Odoo started successfully after ${i} attempts"
-            break
-          fi
-          if [ $i -eq 30 ]; then
-            echo "Odoo failed to start within 150 seconds"
-            echo "=== Odoo Logs ==="
-            docker logs odoo-test
-            echo "=== Database Connection Test ==="
-            docker exec odoo-test python3 -c "
-  import psycopg2
-  try:
-      conn = psycopg2.connect(
-          host='test-postgres',
-          dbname='postgres',
-          user='odoo',
-          password='odoo'
-      )
-      print('Database connection successful!')
-  except Exception as e:
-      print(f'Database connection failed: {e}')"
-            exit 1
-          fi
-          sleep 5
-        done
-  
-    - name: Cleanup
-      if: always()
-      run: |
-        docker stop odoo-test test-postgres || true
-        docker rm odoo-test test-postgres || true
-        docker network rm odoo-test-net || true
-        docker volume rm pgdata-volume || true
-  push:
-    needs: [build, test]
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Download Docker image
-      uses: actions/download-artifact@v4
-      with:
-        name: odoo-docker-image
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Load Docker image
-      run: docker load -i odoo-image.tar
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ env.DOCKER_HUB_USERNAME }}
-        password: ${{ env.DOCKER_HUB_TOKEN }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Push Docker image
-      run: |
-        docker tag ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} ${{ env.DOCKER_IMAGE_NAME }}:latest
-        docker push ${{ env.DOCKER_IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}
-        docker push ${{ env.DOCKER_IMAGE_NAME }}:latest
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/odoo:latest
 
-  deploy:
-    needs: push
-    runs-on: ubuntu-latest
+      - name: Prepare SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > private_key.pem
+          chmod 600 private_key.pem
 
-    steps:
-    - name: Install SSH key
-      uses: shimataro/ssh-key-action@v2
-      with:
-        key: ${{ env.AWS_EC2_SSH_KEY }}
-        known_hosts: 'just-a-placeholder-so-we-dont-get-errors'
-
-    - name: Deploy to AWS EC2
-      run: |
-        ssh -o StrictHostKeyChecking=no ${{ env.AWS_EC2_USER }}@${{ env.AWS_EC2_HOST }} << 'EOF'
-        # Pull the latest Docker image
-        docker pull ${{ env.DOCKER_IMAGE_NAME }}:latest
-        cd odoo-project
-        # Stop and remove the old container if it exists
-        docker stop odoo-app || true
-        docker rm odoo-app || true
-        
-        # Run the new container (with your actual production configuration)
-        docker run -d \
-          --name odoo-app \
-          -p 8069:8069 \
-          -p 8071:8071 \
-          -p 8072:8072 \
-          --link postgres:db \
-          -v odoo-data:/var/lib/odoo \
-          -v odoo-extra-addons:/mnt/extra-addons \
-          -e HOST=db \
-          -e USER=odoo \
-          -e PASSWORD=odoo \
-          ${{ env.DOCKER_IMAGE_NAME }}:latest
-        
-        # Clean up old images
-        docker image prune -af
-        EOF
+      - name: Deploy to EC2 via SSH
+        run: |
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+            cd ~/odoo-docker
+            docker-compose pull
+            docker-compose down
+            docker-compose up -d
+          EOF
